@@ -292,7 +292,7 @@ impl Bot {
             |p| p.distance(&target_pos),
             |p| *p == target_pos,
         );
-        if a_str_path.is_none() {
+        if a_str_path.is_none() && target_pos.x != 0 && target_pos.y != 0 {
             ref_mut_pixel_map[(target_pos.x, target_pos.y)] = PixelType::Wall.as_u8();
             self.calculate_path(ref_mut_pixel_map, ref_gem_list);
         }
