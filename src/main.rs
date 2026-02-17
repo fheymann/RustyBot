@@ -315,7 +315,7 @@ impl Bot {
             Some(next_pos) => {
                 let delta_x: i64 = next_pos.x as i64 - current_pos.x as i64;
                 let delta_y: i64 = next_pos.y as i64 - current_pos.y as i64;
-                eprintln!("{delta_x},{delta_y}");
+                //eprintln!("{delta_x},{delta_y}");
                 match (delta_x, delta_y) {
                     (-1, 0) => "W",
                     (1, 0) => "E",
