@@ -274,34 +274,38 @@ impl Bot {
 
     pub fn calculate_path(
         &self,
-        ref_pixel_map: &PixelMap,
+        ref_mut_pixel_map: &mut PixelMap,
         ref_gem_list: &GemList,
     ) -> Option<(Vec<Pos>, u32)> {
         let target_pos = if ref_gem_list.len() > 0 {
             let ref_first_gem = ref_gem_list.first();
             *ref_first_gem.ref_pos()
         } else {
-            let pos = find_unknown_pos(ref_pixel_map);
-            eprintln!("unkown_pos: {pos:?}");
+            let pos = find_unknown_pos(ref_mut_pixel_map);
+            //eprintln!("unkown_pos: {pos:?}");
             pos
         };
         let current_pos = self.ref_current_pos().unwrap();
         let a_str_path = astar(
             current_pos,
-            |p| p.a_star_succesors(ref_pixel_map),
+            |p| p.a_star_succesors(ref_mut_pixel_map),
             |p| p.distance(&target_pos),
             |p| *p == target_pos,
         );
+        if a_str_path.is_none() {
+            ref_mut_pixel_map[(target_pos.x, target_pos.y)] = PixelType::Wall.as_u8();
+            self.calculate_path(ref_mut_pixel_map, ref_gem_list);
+        }
         a_str_path
     }
 
     pub fn get_move(
         &self,
         rng: &mut StdRng,
-        ref_pixel_map: &PixelMap,
+        ref_mut_pixel_map: &mut PixelMap,
         ref_gem_list: &GemList,
     ) -> &str {
-        let current_path = self.current_path(ref_pixel_map, ref_gem_list);
+        let current_path = self.current_path(ref_mut_pixel_map, ref_gem_list);
         let opt_next_pos = current_path.get(1);
         let current_pos = self.ref_current_pos().unwrap();
         //let moves = ["N", "S", "E", "W", "WAIT"];
@@ -325,8 +329,12 @@ impl Bot {
         }
     }
 
-    pub fn current_path(&self, ref_pixel_map: &PixelMap, ref_gem_list: &GemList) -> Vec<Pos> {
-        if let Some((path, v)) = self.calculate_path(ref_pixel_map, ref_gem_list) {
+    pub fn current_path(
+        &self,
+        ref_mut_pixel_map: &mut PixelMap,
+        ref_gem_list: &GemList,
+    ) -> Vec<Pos> {
+        if let Some((path, v)) = self.calculate_path(ref_mut_pixel_map, ref_gem_list) {
             /*for path_pos in &path {
                 self.current_path.push_back(*path_pos);
             }*/
@@ -428,16 +436,16 @@ fn main() {
         //let pos_vec = vec![Pos { x: 2, y: 2 }];
         let wall_pos_vec = map_to_pos_vec(opt_map.as_ref().unwrap(), PixelType::Wall);
         let mut highlight = Highlight::empty().blue(wall_pos_vec, 70);
-        if let Some(ref_pixel_map) = opt_map.as_ref() {
-            let a_star_path = bot.current_path(ref_pixel_map, &gem_list);
+        if let Some(ref_mut_pixel_map) = opt_map.as_mut() {
+            let a_star_path = bot.current_path(ref_mut_pixel_map, &gem_list);
             highlight = highlight.white(a_star_path, 90);
-            highlight = highlight.color(vec![find_unknown_pos(ref_pixel_map)], "#ff0000", 60);
+            highlight = highlight.color(vec![find_unknown_pos(ref_mut_pixel_map)], "#ff0000", 60);
             let highlight_json = serde_json::to_string(&highlight).unwrap();
             //eprintln!("current_bot_pos: {:?}", bot.ref_current_pos());
             //eprintln!("{gem_list:?}");
             println!(
                 "{} {highlight_json}",
-                bot.get_move(&mut rng, ref_pixel_map, &gem_list)
+                bot.get_move(&mut rng, ref_mut_pixel_map, &gem_list)
             );
             let _ = io::stdout().flush();
         }
