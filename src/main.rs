@@ -1,5 +1,6 @@
 use ndarray::prelude::*;
 use ndarray::{Array, Ix2};
+use pathfinding::matrix::directions::W;
 use pathfinding::prelude::astar;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use serde_json::Value;
@@ -101,12 +102,14 @@ impl TryFrom<&Value> for Pos {
 pub enum PixelType {
     Floor,
     Wall,
+    Unknown,
 }
 impl PixelType {
     fn as_u8(&self) -> u8 {
         match self {
             PixelType::Floor => 0,
             PixelType::Wall => 1,
+            PixelType::Unknown => 255,
         }
     }
 }
@@ -123,6 +126,7 @@ impl TryFrom<u8> for PixelType {
         match value {
             0 => Ok(Self::Floor),
             1 => Ok(Self::Wall),
+            255 => Ok(Self::Unknown),
             _ => Err(value),
         }
     }
@@ -229,16 +233,28 @@ impl Gem {
 
 pub type PixelMap = Array<u8, Ix2>;
 
+pub fn find_unknown_pos(ref_pixel_map: &PixelMap) -> Pos {
+    let mut pos_x = 0;
+    let mut pos_y = 0;
+    for ((x, y), v) in ref_pixel_map.indexed_iter() {
+        if *v == PixelType::Unknown.as_u8() {
+            pos_x = x;
+            pos_y = y;
+        }
+    }
+    Pos::new(pos_x, pos_y)
+}
+
 pub struct Bot {
     pos_hist: VecDeque<Pos>,
-    current_path: VecDeque<Pos>,
+    //current_path: VecDeque<Pos>,
 }
 
 impl Bot {
     pub fn new() -> Self {
         Self {
             pos_hist: VecDeque::new(),
-            current_path: VecDeque::new(),
+            //current_path: VecDeque::new(),
         }
     }
 
@@ -255,20 +271,22 @@ impl Bot {
         ref_pixel_map: &PixelMap,
         ref_gem_list: &GemList,
     ) -> Option<(Vec<Pos>, u32)> {
-        if ref_gem_list.len() > 0 {
+        let target_pos = if ref_gem_list.len() > 0 {
             let ref_first_gem = ref_gem_list.first();
-            let ref_gem_pos = ref_first_gem.ref_pos();
-            let current_pos = self.ref_current_pos().unwrap();
-            let a_str_path = astar(
-                current_pos,
-                |p| p.a_star_succesors(ref_pixel_map),
-                |p| p.distance(ref_gem_pos),
-                |p| *p == *ref_gem_pos,
-            );
-            a_str_path
+            *ref_first_gem.ref_pos()
         } else {
-            None
-        }
+            let pos = find_unknown_pos(ref_pixel_map);
+            eprintln!("unkown_pos: {pos:?}");
+            pos
+        };
+        let current_pos = self.ref_current_pos().unwrap();
+        let a_str_path = astar(
+            current_pos,
+            |p| p.a_star_succesors(ref_pixel_map),
+            |p| p.distance(&target_pos),
+            |p| *p == target_pos,
+        );
+        a_str_path
     }
 
     pub fn get_move(
@@ -348,7 +366,7 @@ fn main() {
                     //eprintln!("Random walker (Rust) launching on a {width}x{height} map");
                     opt_map = Some(Array::from_elem(
                         (width.try_into().unwrap(), height.try_into().unwrap()).f(),
-                        0 as u8,
+                        PixelType::Unknown.as_u8(),
                     ));
                     first_tick = false;
                 }
@@ -367,6 +385,15 @@ fn main() {
                     if let Some(ref mut tmp_map) = opt_map {
                         //tmp_map[(wall_pixel, 0)] = 17;
                         tmp_map[(wall_pos.x, wall_pos.y)] = PixelType::Wall.into();
+                    }
+                }
+            }
+            if let Some(Value::Array(wall_pixels)) = map.get("floor") {
+                for floor_pixel in wall_pixels {
+                    let floor_pos: Pos = floor_pixel.try_into().unwrap();
+                    if let Some(ref mut tmp_map) = opt_map {
+                        //tmp_map[(wall_pixel, 0)] = 17;
+                        tmp_map[(floor_pos.x, floor_pos.y)] = PixelType::Floor.into();
                     }
                 }
             }
