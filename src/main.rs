@@ -164,11 +164,31 @@ impl GemList {
         if !self.exists(&pos) {
             self.gem_vec.push(Gem::new(pos, ttl))
         } else {
-            eprintln!("Gem exists at pos: {pos:?} with ttl: {ttl}");
+            //eprintln!("Gem exists at pos: {pos:?} with ttl: {ttl}");
         }
     }
 
-    pub fn next_tick(&mut self) {
+    pub fn remove_gem(&mut self, ref_pos: &Pos) {
+        let mut opt_remove_idx = None;
+        for (idx, gem) in &mut self.gem_vec.iter().enumerate() {
+            if gem.pos == *ref_pos {
+                opt_remove_idx = Some(idx)
+            }
+        }
+        if let Some(remove_idx) = opt_remove_idx {
+            self.gem_vec.remove(remove_idx);
+        }
+    }
+
+    pub fn check_bot_pos(&mut self, ref_bot: &Bot) {
+        let bot_pos = ref_bot.ref_current_pos().unwrap();
+        if self.exists(bot_pos) {
+            self.remove_gem(bot_pos);
+        }
+    }
+
+    pub fn next_tick(&mut self, ref_bot: &Bot) {
+        self.check_bot_pos(ref_bot);
         for gem in &mut self.gem_vec {
             gem.next_tick();
         }
@@ -251,8 +271,41 @@ impl Bot {
         }
     }
 
+    pub fn get_move(
+        &self,
+        rng: &mut StdRng,
+        ref_pixel_map: &PixelMap,
+        ref_gem_list: &GemList,
+    ) -> &str {
+        let current_path = self.current_path(ref_pixel_map, ref_gem_list);
+        let opt_next_pos = current_path.get(1);
+        let current_pos = self.ref_current_pos().unwrap();
+        //let moves = ["N", "S", "E", "W", "WAIT"];
+        let moves = ["N", "S", "E", "W"];
+        let move_index = rng.random_range(0..moves.len());
+        match opt_next_pos {
+            Some(next_pos) => {
+                let delta_x: i64 = next_pos.x as i64 - current_pos.x as i64;
+                let delta_y: i64 = next_pos.y as i64 - current_pos.y as i64;
+                eprintln!("{delta_x},{delta_y}");
+                match (delta_x, delta_y) {
+                    (-1, 0) => "W",
+                    (1, 0) => "E",
+                    (0, 1) => "S",
+                    (0, -1) => "N",
+                    (0, 0) => "WAIT",
+                    _ => moves[move_index],
+                }
+            }
+            _ => moves[move_index],
+        }
+    }
+
     pub fn current_path(&self, ref_pixel_map: &PixelMap, ref_gem_list: &GemList) -> Vec<Pos> {
         if let Some((path, v)) = self.calculate_path(ref_pixel_map, ref_gem_list) {
+            /*for path_pos in &path {
+                self.current_path.push_back(*path_pos);
+            }*/
             path
         } else {
             Vec::new()
@@ -262,7 +315,7 @@ impl Bot {
 
 fn main() {
     let mut rng = StdRng::seed_from_u64(1);
-    let moves = ["N", "S", "E", "W", "WAIT"];
+    //let moves = ["N", "S", "E", "W", "WAIT"];
     let mut first_tick = true;
     let mut gem_list = GemList::new();
     let mut bot = Bot::new();
@@ -301,7 +354,6 @@ fn main() {
                 }
             }
         }
-        gem_list.next_tick();
         if let Some(Value::Object(map)) = data.as_ref() {
             if let Some(bot_pos_json) = map.get("bot") {
                 //eprintln!("Map: {rust_map:?}");
@@ -334,9 +386,10 @@ fn main() {
                 }
             }
         }
+        gem_list.next_tick(&bot);
 
         // Emit a random move
-        let move_index = rng.random_range(0..moves.len());
+        //let move_index = rng.random_range(0..moves.len());
         // Write and flush promptly
         //let highlight_json = "{\"highlight\":[[2,2,\"#00ff0050\"]]}";
         //let pos_vec = vec![Pos { x: 2, y: 2 }];
@@ -345,11 +398,15 @@ fn main() {
         if let Some(ref_pixel_map) = opt_map.as_ref() {
             let a_star_path = bot.current_path(ref_pixel_map, &gem_list);
             highlight = highlight.white(a_star_path, 90);
+
+            let highlight_json = serde_json::to_string(&highlight).unwrap();
+            //eprintln!("current_bot_pos: {:?}", bot.ref_current_pos());
+            //eprintln!("{gem_list:?}");
+            println!(
+                "{} {highlight_json}",
+                bot.get_move(&mut rng, ref_pixel_map, &gem_list)
+            );
+            let _ = io::stdout().flush();
         }
-        let highlight_json = serde_json::to_string(&highlight).unwrap();
-        eprintln!("current_bot_pos: {:?}", bot.ref_current_pos());
-        eprintln!("{gem_list:?}");
-        println!("{} {highlight_json}", moves[move_index]);
-        let _ = io::stdout().flush();
     }
 }
