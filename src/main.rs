@@ -237,9 +237,15 @@ pub fn find_unknown_pos(ref_pixel_map: &PixelMap) -> Pos {
     let mut pos_x = 0;
     let mut pos_y = 0;
     for ((x, y), v) in ref_pixel_map.indexed_iter() {
-        if *v == PixelType::Unknown.as_u8() {
+        if x > 0
+            && x < ref_pixel_map.dim().0 - 1
+            && y > 0
+            && y < ref_pixel_map.dim().1 - 1
+            && *v == PixelType::Unknown.as_u8()
+        {
             pos_x = x;
             pos_y = y;
+            break;
         }
     }
     Pos::new(pos_x, pos_y)
@@ -425,7 +431,7 @@ fn main() {
         if let Some(ref_pixel_map) = opt_map.as_ref() {
             let a_star_path = bot.current_path(ref_pixel_map, &gem_list);
             highlight = highlight.white(a_star_path, 90);
-
+            highlight = highlight.color(vec![find_unknown_pos(ref_pixel_map)], "#ff0000", 60);
             let highlight_json = serde_json::to_string(&highlight).unwrap();
             //eprintln!("current_bot_pos: {:?}", bot.ref_current_pos());
             //eprintln!("{gem_list:?}");
