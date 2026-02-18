@@ -381,7 +381,7 @@ impl Gem {
 
     pub fn add_measurement(&mut self, bot_pos: Pos, signal: f64) {
         let signal_fade = 10.;
-        let tmp_fade = (300. - self.ttl as f64) / signal_fade;
+        let tmp_fade = (300. + 1. - self.ttl as f64) / signal_fade;
         let fade = if tmp_fade < 1. { tmp_fade } else { 1. };
         eprintln!("fade: {fade}");
         self.meas_hist.push((bot_pos, fade, signal));
@@ -394,7 +394,7 @@ impl Gem {
             let current_guess = self.guess_pos;
             let mut new_guess_x = current_guess.x;
             let mut new_guess_y = current_guess.y;
-            for _ in 0..10 {
+            for _ in 0..5 {
                 for ix in vec![-1i64, 0i64, 1i64] {
                     for iy in vec![-1i64, 0i64, 1i64] {
                         let new_x = current_guess.x as i64 + ix;
