@@ -1,10 +1,12 @@
 use ndarray::prelude::*;
 use ndarray::{Array, Ix2};
 use pathfinding::matrix::directions::W;
+use pathfinding::num_traits::sign;
 use pathfinding::prelude::astar;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use serde_json::Value;
 use std::collections::VecDeque;
+use std::default;
 use std::io::{self, BufRead, Write};
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -153,7 +155,7 @@ impl GemList {
             gem_vec: Vec::new(),
         }
     }
-    pub fn exists(&self, ref_pos: &Pos) -> bool {
+    pub fn exists_pos(&self, ref_pos: &Pos) -> bool {
         let mut exists = false;
         for gem in &self.gem_vec {
             if *gem.ref_pos() == *ref_pos {
@@ -164,21 +166,67 @@ impl GemList {
         exists
     }
 
-    pub fn add_gem(&mut self, pos: Pos, ttl: u64) {
-        if !self.exists(&pos) {
-            self.gem_vec.push(Gem::new(pos, ttl))
+    pub fn exists_channel(&self, channel_id: usize) -> bool {
+        let mut exists: bool = false;
+        for gem in &self.gem_vec {
+            if gem.channel_id() == channel_id {
+                exists = true;
+                break;
+            }
+        }
+        exists
+    }
+
+    pub fn ref_mut_gem_by_channel(&mut self, channel_id: usize) -> Option<&mut Gem> {
+        let mut ref_gem = None;
+        for gem in &mut self.gem_vec {
+            if gem.channel_id() == channel_id {
+                ref_gem = Some(gem);
+                break;
+            }
+        }
+        ref_gem
+    }
+
+    pub fn add_channel_measurement(&mut self, channel_id: usize, bot_pos: Pos, signal: f64) {
+        if let Some(ref mut ref_gem) = self.ref_mut_gem_by_channel(channel_id) {
+            ref_gem.add_measurement(bot_pos, signal);
+        }
+    }
+
+    pub fn add_gem_with_pos(&mut self, pos: Pos, ttl: u64) {
+        if !self.exists_pos(&pos) {
+            self.gem_vec.push(Gem::new_with_pos(pos, ttl));
         } else {
             //eprintln!("Gem exists at pos: {pos:?} with ttl: {ttl}");
+        }
+    }
+
+    pub fn add_gem_with_channel(
+        &mut self,
+        ref_pixel_map: &PixelMap,
+        bot_pos: Pos,
+        ttl: u64,
+        channel_id: usize,
+    ) {
+        if !self.exists_channel(channel_id) {
+            self.gem_vec.push(Gem::new_with_channel(
+                ref_pixel_map,
+                bot_pos,
+                ttl,
+                channel_id,
+            ));
         }
     }
 
     pub fn remove_gem(&mut self, ref_pos: &Pos) {
         let mut opt_remove_idx = None;
         for (idx, gem) in &mut self.gem_vec.iter().enumerate() {
-            if gem.pos == *ref_pos {
+            if *gem.ref_pos() == *ref_pos {
                 opt_remove_idx = Some(idx)
             }
         }
+
         if let Some(remove_idx) = opt_remove_idx {
             self.gem_vec.remove(remove_idx);
         }
@@ -186,7 +234,7 @@ impl GemList {
 
     pub fn check_bot_pos(&mut self, ref_bot: &Bot) {
         let bot_pos = ref_bot.ref_current_pos().unwrap();
-        if self.exists(bot_pos) {
+        if self.exists_pos(bot_pos) {
             self.remove_gem(bot_pos);
         }
     }
@@ -194,12 +242,52 @@ impl GemList {
     pub fn next_tick(&mut self, ref_bot: &Bot) {
         self.check_bot_pos(ref_bot);
         for gem in &mut self.gem_vec {
-            gem.next_tick();
+            gem.next_tick(*ref_bot.ref_current_pos().unwrap());
         }
     }
 
-    pub fn first(&self) -> Gem {
-        self.gem_vec[0]
+    pub fn first_known(&self) -> Option<Gem> {
+        if !self.known_vec().is_empty() {
+            Some(self.known_vec()[0].clone())
+        } else {
+            None
+        }
+    }
+
+    pub fn known_pos_vec(&self) -> Vec<Pos> {
+        let mut pos_vec = Vec::new();
+        for gem in self.known_vec() {
+            pos_vec.push(*gem.ref_known_pos().unwrap());
+        }
+        pos_vec
+    }
+
+    pub fn guess_pos_vec(&self) -> Vec<Pos> {
+        let mut pos_vec = Vec::new();
+        for gem in self.guess_vec() {
+            pos_vec.push(*gem.ref_pos());
+        }
+        pos_vec
+    }
+
+    pub fn guess_vec(&self) -> Vec<&Gem> {
+        let mut guess_vec = Vec::new();
+        for tmp_gem in &self.gem_vec {
+            if tmp_gem.ref_known_pos().is_none() {
+                guess_vec.push(tmp_gem);
+            }
+        }
+        guess_vec
+    }
+
+    pub fn known_vec(&self) -> Vec<&Gem> {
+        let mut known_vec = Vec::new();
+        for tmp_gem in &self.gem_vec {
+            if tmp_gem.ref_known_pos().is_some() {
+                known_vec.push(tmp_gem);
+            }
+        }
+        known_vec
     }
 
     pub fn len(&self) -> usize {
@@ -207,27 +295,106 @@ impl GemList {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
 pub struct Gem {
-    pos: Pos,
+    known_pos: Option<Pos>,
+    guess_pos: Pos,
     ttl: u64,
+    meas_hist: Vec<(Pos, u64, f64)>,
+    channel_id: usize,
 }
 
 impl Gem {
-    pub fn new(pos: Pos, ttl: u64) -> Self {
-        Self { pos, ttl }
+    pub fn new_with_channel(
+        ref_pixel_map: &PixelMap,
+        bot_pos: Pos,
+        ttl: u64,
+        channel_id: usize,
+    ) -> Self {
+        let guess_pos = Pos::new(ref_pixel_map.dim().0 / 2, ref_pixel_map.dim().1 / 2);
+        Self {
+            known_pos: None,
+            ttl,
+            guess_pos,
+            channel_id,
+            meas_hist: Vec::new(),
+        }
+    }
+
+    pub fn new_with_pos(pos: Pos, ttl: u64) -> Self {
+        Self {
+            known_pos: Some(pos),
+            ttl,
+            guess_pos: pos,
+            channel_id: usize::MAX,
+            meas_hist: Vec::new(),
+        }
+    }
+
+    pub fn ref_known_pos(&self) -> Option<&Pos> {
+        self.known_pos.as_ref()
     }
 
     pub fn ref_pos(&self) -> &Pos {
-        &self.pos
+        if let Some(pos) = self.known_pos.as_ref() {
+            pos
+        } else {
+            &self.guess_pos
+        }
+    }
+
+    pub fn channel_id(&self) -> usize {
+        self.channel_id
+    }
+
+    pub fn update_ttl(&mut self, ttl: u64) {
+        self.ttl = ttl;
     }
 
     pub fn ttl(&self) -> u64 {
         self.ttl
     }
 
-    pub fn next_tick(&mut self) {
+    pub fn add_measurement(&mut self, bot_pos: Pos, signal: f64) {
+        self.meas_hist.push((bot_pos, self.ttl, signal));
+    }
+
+    pub fn next_tick(&mut self, bot_pos: Pos) {
         self.ttl -= 1;
+        if self.known_pos.is_none() {
+            let current_guess = self.guess_pos;
+            let mut find_min = 1e99;
+            let mut new_guess_x = current_guess.x;
+            let mut new_guess_y = current_guess.y;
+            for ix in vec![-1i64, 0i64, 1i64] {
+                for iy in vec![-1i64, 0i64, 1i64] {
+                    let new_x = current_guess.x as i64 + ix;
+                    let new_y = current_guess.y as i64 + iy;
+                    let delta_x = new_x - bot_pos.x as i64;
+                    let default_y = new_y - bot_pos.y as i64;
+                    let distance = ((delta_x as f64).powf(2.) + (default_y as f64).powf(2.)).sqrt();
+                    for (meas_pos, meas_ttl, meas_signal) in &self.meas_hist {
+                        let signal_fade = 10.;
+                        let signal_radius = 7.;
+                        let tmp_fade = (*meas_ttl as f64 - self.ttl as f64) / signal_fade;
+                        let fade = if tmp_fade < 1. { tmp_fade } else { 1. };
+                        let gem_signal = fade * 1. / (distance / signal_radius);
+                        let tmp_min = (gem_signal - meas_signal).powf(2.);
+                        eprintln!(
+                            "gem_signal: {}, meas_signal: {}, tmp_min: {} find_min: {})",
+                            gem_signal, meas_signal, tmp_min, find_min
+                        );
+                        if tmp_min < find_min {
+                            find_min = tmp_min;
+                            new_guess_x = new_x as usize;
+                            new_guess_y = new_y as usize;
+                        }
+                    }
+                }
+            }
+            self.guess_pos = Pos::new(new_guess_x, new_guess_y);
+            eprintln!("guessing new Pos: {:?})", self.guess_pos);
+        }
     }
 }
 
@@ -277,8 +444,8 @@ impl Bot {
         ref_mut_pixel_map: &mut PixelMap,
         ref_gem_list: &GemList,
     ) -> Option<(Vec<Pos>, u32)> {
-        let target_pos = if ref_gem_list.len() > 0 {
-            let ref_first_gem = ref_gem_list.first();
+        let target_pos = if ref_gem_list.first_known().is_some() {
+            let ref_first_gem = ref_gem_list.first_known().unwrap();
             *ref_first_gem.ref_pos()
         } else {
             let pos = find_unknown_pos(ref_mut_pixel_map);
@@ -411,6 +578,26 @@ fn main() {
                     }
                 }
             }
+            if let Some(Value::Array(channel_meas_vec)) = map.get("channels") {
+                for (channel_id, channel_meas) in channel_meas_vec.iter().enumerate() {
+                    let meas = channel_meas.as_f64().unwrap();
+                    if meas > 0. {
+                        if let Some(ref ref_pixel_map) = opt_map {
+                            gem_list.add_gem_with_channel(
+                                ref_pixel_map,
+                                *bot.ref_current_pos().unwrap(),
+                                300,
+                                channel_id,
+                            );
+                            gem_list.add_channel_measurement(
+                                channel_id,
+                                *bot.ref_current_pos().unwrap(),
+                                meas,
+                            );
+                        }
+                    }
+                }
+            }
 
             if let Some(Value::Array(gem_vec_json)) = map.get("visible_gems") {
                 for gem_entry_json in gem_vec_json {
@@ -422,7 +609,7 @@ fn main() {
                     };
                     if let Some(gem_pos_json) = gem_entry_json.get("position") {
                         let gem_pos: Pos = gem_pos_json.try_into().unwrap();
-                        gem_list.add_gem(gem_pos, ttl);
+                        gem_list.add_gem_with_pos(gem_pos, ttl);
                     }
                 }
             }
@@ -435,7 +622,10 @@ fn main() {
         //let highlight_json = "{\"highlight\":[[2,2,\"#00ff0050\"]]}";
         //let pos_vec = vec![Pos { x: 2, y: 2 }];
         let wall_pos_vec = map_to_pos_vec(opt_map.as_ref().unwrap(), PixelType::Wall);
-        let mut highlight = Highlight::empty().blue(wall_pos_vec, 70);
+        let mut highlight = Highlight::empty()
+            .blue(wall_pos_vec, 70)
+            .color(gem_list.known_pos_vec(), "ffff00", 90)
+            .color(gem_list.guess_pos_vec(), "ff00ff", 60);
         if let Some(ref_mut_pixel_map) = opt_map.as_mut() {
             let a_star_path = bot.current_path(ref_mut_pixel_map, &gem_list);
             highlight = highlight.white(a_star_path, 90);
