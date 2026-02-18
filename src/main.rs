@@ -262,6 +262,14 @@ impl GemList {
         }
     }
 
+    pub fn first_guess(&self) -> Option<Gem> {
+        if !self.guess_vec().is_empty() {
+            Some(self.guess_vec()[0].clone())
+        } else {
+            None
+        }
+    }
+
     pub fn first_known(&self) -> Option<Gem> {
         if !self.known_vec().is_empty() {
             Some(self.known_vec()[0].clone())
@@ -373,8 +381,7 @@ impl Gem {
 
     pub fn add_measurement(&mut self, bot_pos: Pos, signal: f64) {
         let signal_fade = 10.;
-        let signal_radius = 7.;
-        let tmp_fade = (301. - self.ttl as f64) / signal_fade;
+        let tmp_fade = (300. - self.ttl as f64) / signal_fade;
         let fade = if tmp_fade < 1. { tmp_fade } else { 1. };
         eprintln!("fade: {fade}");
         self.meas_hist.push((bot_pos, fade, signal));
@@ -383,8 +390,8 @@ impl Gem {
     pub fn next_tick(&mut self, bot_pos: Pos) {
         self.ttl -= 1;
         if self.known_pos.is_none() {
-            let current_guess = self.guess_pos;
             let mut find_min = 1e99;
+            let current_guess = self.guess_pos;
             let mut new_guess_x = current_guess.x;
             let mut new_guess_y = current_guess.y;
             for _ in 0..10 {
@@ -394,13 +401,12 @@ impl Gem {
                         let new_y = current_guess.y as i64 + iy;
                         let mut tmp_min = 0.;
                         for (meas_pos, fade, meas_signal) in &self.meas_hist {
-                            let delta_x = new_x - meas_pos.x as i64;
-                            let delta_y = new_y - meas_pos.y as i64;
-                            let distance =
-                                ((delta_x as f64).powf(2.) + (delta_y as f64).powf(2.)).sqrt();
+                            let delta_x = new_x as f64 - meas_pos.x as f64;
+                            let delta_y = new_y as f64 - meas_pos.y as f64;
+                            let distance = (delta_x.powf(2.) + delta_y.powf(2.)).sqrt();
                             let signal_radius = 7.;
-                            let gem_signal = fade / (1. + (distance / signal_radius).powf(2.0));
-                            tmp_min += (gem_signal - meas_signal).powf(2.);
+                            let gem_signal = *fade / (1. + (distance / signal_radius).powf(2.0));
+                            tmp_min += (gem_signal - *meas_signal).powf(2.);
                         }
                         if tmp_min < find_min {
                             find_min = tmp_min;
@@ -465,6 +471,9 @@ impl Bot {
         let target_pos = if ref_gem_list.first_known().is_some() {
             let ref_first_gem = ref_gem_list.first_known().unwrap();
             *ref_first_gem.ref_pos()
+        } else if ref_gem_list.first_guess().is_some() {
+            let ref_first_guess = ref_gem_list.first_guess().unwrap();
+            *ref_first_guess.ref_pos()
         } else {
             let pos = find_unknown_pos(ref_mut_pixel_map);
             //eprintln!("unkown_pos: {pos:?}");
@@ -573,7 +582,7 @@ fn main() {
         }
 
         if let Some(Value::Object(map)) = data.as_ref() {
-            eprintln!("map: {map:?}");
+            //eprintln!("map: {map:?}");
             if let Some(bot_pos_json) = map.get("bot") {
                 //eprintln!("Map: {rust_map:?}");
                 eprintln!("Bot position: {bot_pos_json:?}");
