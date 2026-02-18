@@ -177,6 +177,20 @@ impl GemList {
         exists
     }
 
+    pub fn remove_channel(&mut self, channel_id: usize) {
+        let mut opt_remove_idx = None;
+        for (idx, gem) in &mut self.gem_vec.iter().enumerate() {
+            if gem.channel_id() == channel_id {
+                opt_remove_idx = Some(idx);
+                break;
+            }
+        }
+
+        if let Some(remove_idx) = opt_remove_idx {
+            self.gem_vec.remove(remove_idx);
+        }
+    }
+
     pub fn ref_mut_gem_by_channel(&mut self, channel_id: usize) -> Option<&mut Gem> {
         let mut ref_gem = None;
         for gem in &mut self.gem_vec {
@@ -190,6 +204,7 @@ impl GemList {
 
     pub fn add_channel_measurement(&mut self, channel_id: usize, bot_pos: Pos, signal: f64) {
         if let Some(ref mut ref_gem) = self.ref_mut_gem_by_channel(channel_id) {
+            eprintln!("add_measurement");
             ref_gem.add_measurement(bot_pos, signal);
         }
     }
@@ -223,7 +238,8 @@ impl GemList {
         let mut opt_remove_idx = None;
         for (idx, gem) in &mut self.gem_vec.iter().enumerate() {
             if *gem.ref_pos() == *ref_pos {
-                opt_remove_idx = Some(idx)
+                opt_remove_idx = Some(idx);
+                break;
             }
         }
 
@@ -300,7 +316,7 @@ pub struct Gem {
     known_pos: Option<Pos>,
     guess_pos: Pos,
     ttl: u64,
-    meas_hist: Vec<(Pos, u64, f64)>,
+    meas_hist: Vec<(Pos, f64, f64)>,
     channel_id: usize,
 }
 
@@ -356,7 +372,12 @@ impl Gem {
     }
 
     pub fn add_measurement(&mut self, bot_pos: Pos, signal: f64) {
-        self.meas_hist.push((bot_pos, self.ttl, signal));
+        let signal_fade = 10.;
+        let signal_radius = 7.;
+        let tmp_fade = (301. - self.ttl as f64) / signal_fade;
+        let fade = if tmp_fade < 1. { tmp_fade } else { 1. };
+        eprintln!("fade: {fade}");
+        self.meas_hist.push((bot_pos, fade, signal));
     }
 
     pub fn next_tick(&mut self, bot_pos: Pos) {
@@ -366,24 +387,21 @@ impl Gem {
             let mut find_min = 1e99;
             let mut new_guess_x = current_guess.x;
             let mut new_guess_y = current_guess.y;
-            for ix in vec![-1i64, 0i64, 1i64] {
-                for iy in vec![-1i64, 0i64, 1i64] {
-                    let new_x = current_guess.x as i64 + ix;
-                    let new_y = current_guess.y as i64 + iy;
-                    let delta_x = new_x - bot_pos.x as i64;
-                    let default_y = new_y - bot_pos.y as i64;
-                    let distance = ((delta_x as f64).powf(2.) + (default_y as f64).powf(2.)).sqrt();
-                    for (meas_pos, meas_ttl, meas_signal) in &self.meas_hist {
-                        let signal_fade = 10.;
-                        let signal_radius = 7.;
-                        let tmp_fade = (*meas_ttl as f64 - self.ttl as f64) / signal_fade;
-                        let fade = if tmp_fade < 1. { tmp_fade } else { 1. };
-                        let gem_signal = fade * 1. / (distance / signal_radius);
-                        let tmp_min = (gem_signal - meas_signal).powf(2.);
-                        eprintln!(
-                            "gem_signal: {}, meas_signal: {}, tmp_min: {} find_min: {})",
-                            gem_signal, meas_signal, tmp_min, find_min
-                        );
+            for _ in 0..10 {
+                for ix in vec![-1i64, 0i64, 1i64] {
+                    for iy in vec![-1i64, 0i64, 1i64] {
+                        let new_x = current_guess.x as i64 + ix;
+                        let new_y = current_guess.y as i64 + iy;
+                        let mut tmp_min = 0.;
+                        for (meas_pos, fade, meas_signal) in &self.meas_hist {
+                            let delta_x = new_x - meas_pos.x as i64;
+                            let delta_y = new_y - meas_pos.y as i64;
+                            let distance =
+                                ((delta_x as f64).powf(2.) + (delta_y as f64).powf(2.)).sqrt();
+                            let signal_radius = 7.;
+                            let gem_signal = fade / (1. + (distance / signal_radius).powf(2.0));
+                            tmp_min += (gem_signal - meas_signal).powf(2.);
+                        }
                         if tmp_min < find_min {
                             find_min = tmp_min;
                             new_guess_x = new_x as usize;
@@ -553,10 +571,12 @@ fn main() {
                 }
             }
         }
+
         if let Some(Value::Object(map)) = data.as_ref() {
+            eprintln!("map: {map:?}");
             if let Some(bot_pos_json) = map.get("bot") {
                 //eprintln!("Map: {rust_map:?}");
-                //eprintln!("Bot position: {bot_pos:?}");
+                eprintln!("Bot position: {bot_pos_json:?}");
                 let bot_pos = bot_pos_json.try_into().unwrap();
                 bot.update_pos(bot_pos);
             }
@@ -579,6 +599,7 @@ fn main() {
                 }
             }
             if let Some(Value::Array(channel_meas_vec)) = map.get("channels") {
+                eprintln!("channels: {:?}", channel_meas_vec);
                 for (channel_id, channel_meas) in channel_meas_vec.iter().enumerate() {
                     let meas = channel_meas.as_f64().unwrap();
                     if meas > 0. {
@@ -589,12 +610,14 @@ fn main() {
                                 300,
                                 channel_id,
                             );
-                            gem_list.add_channel_measurement(
-                                channel_id,
-                                *bot.ref_current_pos().unwrap(),
-                                meas,
-                            );
                         }
+                        gem_list.add_channel_measurement(
+                            channel_id,
+                            *bot.ref_current_pos().unwrap(),
+                            meas,
+                        );
+                    } else {
+                        gem_list.remove_channel(channel_id);
                     }
                 }
             }
