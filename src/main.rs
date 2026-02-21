@@ -1,12 +1,9 @@
 use ndarray::prelude::*;
 use ndarray::{Array, Ix2};
-use pathfinding::matrix::directions::W;
-use pathfinding::num_traits::sign;
 use pathfinding::prelude::astar;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use serde_json::Value;
 use std::collections::VecDeque;
-use std::default;
 use std::io::{self, BufRead, Write};
 
 #[derive(Debug, Clone)]
@@ -133,7 +130,7 @@ impl TryFrom<&Value> for Pos {
     fn try_from(value: &Value) -> Result<Self, Self::Error> {
         if let Value::Array(xy_array) = value {
             if let (Some(Value::Number(x_num)), Some(Value::Number(y_num))) =
-                (xy_array.get(0), xy_array.get(1))
+                (xy_array.first(), xy_array.get(1))
             {
                 Ok(Pos {
                     x: x_num.as_u64().unwrap().try_into().unwrap(),
@@ -213,24 +210,27 @@ impl GemList {
         exists
     }
 
-    pub fn best_target_pos(&self, bot_pos: Pos) -> Option<Pos> {
+    pub fn best_target_pos(&self, ref_scrim_config: &ScrimConfig, ref_bot: &Bot) -> Option<Pos> {
         let mut ret_pos = None;
         if !self.known_pos_vec().is_empty() {
             let mut min_dist = u32::MAX;
             for pos in self.known_pos_vec() {
-                let dist = pos.distance(&bot_pos);
+                let dist = pos.distance(&ref_bot.ref_current_pos().unwrap());
                 if dist < min_dist {
                     min_dist = dist;
                     ret_pos = Some(pos);
                 }
             }
         } else if !self.guess_pos_vec().is_empty() {
-            let mut min_err = f64::MAX;
+            let mut max_signal = f64::MIN;
             for gem in self.guess_vec() {
-                let tmp_err = gem.guess_err;
-                if tmp_err < min_err {
-                    min_err = tmp_err;
-                    ret_pos = Some(gem.guess_pos);
+                if gem.ttl < ref_scrim_config.gem_ttl - ref_scrim_config.signal_fade as u64
+                    && let Some(tmp_signal) = ref_bot.get_signal(gem.channel_id())
+                {
+                    if *tmp_signal > max_signal {
+                        max_signal = *tmp_signal;
+                        ret_pos = Some(gem.guess_pos);
+                    }
                 }
             }
         }
@@ -248,7 +248,7 @@ impl GemList {
         exists
     }
 
-    pub fn remove_channel(&mut self, channel_id: usize) {
+    pub fn remove_gem_with_channel(&mut self, channel_id: usize) {
         let mut opt_remove_idx = None;
         for (idx, gem) in &mut self.gem_vec.iter().enumerate() {
             if gem.channel_id() == channel_id {
@@ -301,27 +301,17 @@ impl GemList {
         if !self.exists_pos(&pos) {
             self.gem_vec.push(Gem::new_with_pos(pos, ttl));
         } else {
-            let mut gem = self.ref_mut_gem_by_pos(pos).unwrap();
+            let gem = self.ref_mut_gem_by_pos(pos).unwrap();
             gem.known_pos = Some(pos);
             gem.ttl = ttl;
             //eprintln!("Gem exists at pos: {pos:?} with ttl: {ttl}");
         }
     }
 
-    pub fn add_gem_with_channel(
-        &mut self,
-        ref_pixel_map: &PixelMap,
-        bot_pos: Pos,
-        ttl: u64,
-        channel_id: usize,
-    ) {
+    pub fn add_gem_with_channel(&mut self, ref_pixel_map: &PixelMap, ttl: u64, channel_id: usize) {
         if !self.exists_channel(channel_id) {
-            self.gem_vec.push(Gem::new_with_channel(
-                ref_pixel_map,
-                bot_pos,
-                ttl,
-                channel_id,
-            ));
+            self.gem_vec
+                .push(Gem::new_with_channel(ref_pixel_map, ttl, channel_id));
         }
     }
 
@@ -346,10 +336,10 @@ impl GemList {
         }
     }
 
-    pub fn next_tick(&mut self, ref_scrim_config: &ScrimConfig, ref_bot: &Bot) {
+    pub fn next_tick(&mut self, ref_scrim_config: &ScrimConfig, ref_bot: &Bot, ref_pixel_map: &PixelMap) {
         self.check_bot_pos(ref_bot);
         for gem in &mut self.gem_vec {
-            gem.next_tick(ref_scrim_config, *ref_bot.ref_current_pos().unwrap());
+            gem.next_tick(ref_scrim_config, ref_bot,ref_pixel_map);
         }
     }
 
@@ -408,6 +398,10 @@ impl GemList {
     pub fn len(&self) -> usize {
         self.gem_vec.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.gem_vec.is_empty()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -415,26 +409,24 @@ pub struct Gem {
     known_pos: Option<Pos>,
     guess_pos: Pos,
     guess_err: f64,
+    guess_not_moved: usize,
     ttl: u64,
     meas_hist: VecDeque<(Pos, f64, f64)>,
     channel_id: usize,
+
 }
 
 impl Gem {
-    pub fn new_with_channel(
-        ref_pixel_map: &PixelMap,
-        bot_pos: Pos,
-        ttl: u64,
-        channel_id: usize,
-    ) -> Self {
+    pub fn new_with_channel(ref_pixel_map: &PixelMap, ttl: u64, channel_id: usize) -> Self {
         let guess_pos = Pos::new(ref_pixel_map.dim().0 / 2, ref_pixel_map.dim().1 / 2);
         Self {
             known_pos: None,
             ttl,
             guess_pos,
-            guess_err: 1e99,
+            guess_err: f64::MAX,
             channel_id,
             meas_hist: VecDeque::new(),
+            guess_not_moved: 0,
         }
     }
 
@@ -446,6 +438,7 @@ impl Gem {
             guess_err: 0.,
             channel_id: usize::MAX,
             meas_hist: VecDeque::new(),
+            guess_not_moved:0 
         }
     }
 
@@ -475,9 +468,9 @@ impl Gem {
 
     pub fn add_measurement(&mut self, ref_scrim_config: &ScrimConfig, bot_pos: Pos, signal: f64) {
         let signal_fade = ref_scrim_config.signal_fade;
-        let tmp_fade = (ref_scrim_config.gem_ttl as f64 + 1. - self.ttl as f64) / (signal_fade);
+        let tmp_fade = (ref_scrim_config.gem_ttl + 1 - self.ttl) as f64 / (signal_fade);
         let fade = if tmp_fade < 1. { tmp_fade } else { 1. };
-        //eprintln!("fade: {fade}");
+        //eprintln!("adding measurement fade: {fade} signal:{signal}");
         self.meas_hist.push_back((bot_pos, fade, signal));
         /*if self.guess_err > 1e-5 {
             self.meas_hist.push_back((bot_pos, fade, signal));
@@ -487,41 +480,41 @@ impl Gem {
         }*/
     }
 
-    pub fn next_tick(&mut self, ref_scrim_config: &ScrimConfig, bot_pos: Pos) {
+    pub fn next_tick(&mut self, ref_scrim_config: &ScrimConfig, ref_bot: &Bot,ref_pixel_map: &PixelMap) {
         self.ttl -= 1;
-        if self.known_pos.is_none() && self.guess_err > 1e-5 {
-            let mut find_min_err = 1e99;
+        self.guess_err*=f64::MAX;
+        if self.known_pos.is_none() {
             let current_guess = self.guess_pos;
             let mut new_guess_x = current_guess.x;
             let mut new_guess_y = current_guess.y;
-            for _ in 0..5 {
-                let mut found_tmp_min = false;
-                //                for ix in [-2i64, -1i64, 0i64, 1i64, 2i64] {
-                //                    for iy in [-2i64, -1i64, 0i64, 1i64, 2i64] {
-                for ix in [-1i64, 0i64, 1i64] {
-                    for iy in [-1i64, 0i64, 1i64] {
-                        let new_x = current_guess.x as i64 + ix;
-                        let new_y = current_guess.y as i64 + iy;
-                        let mut tmp_min = 0.;
-                        for (meas_pos, fade, meas_signal) in &self.meas_hist {
-                            let delta_x = new_x as f64 - meas_pos.x as f64;
-                            let delta_y = new_y as f64 - meas_pos.y as f64;
-                            let distance = (delta_x.powf(2.) + delta_y.powf(2.)).sqrt();
-                            let signal_radius = ref_scrim_config.signal_radius;
-                            let gem_signal = *fade / (1. + (distance / signal_radius).powf(2.0));
-                            tmp_min += (gem_signal - *meas_signal).powf(2.);
-                        }
-                        //tmp_min = tmp_min / self.meas_hist.len() as f64;
-                        if tmp_min < find_min_err {
-                            found_tmp_min = true;
-                            find_min_err = tmp_min;
-                            new_guess_x = new_x as usize;
-                            new_guess_y = new_y as usize;
-                        }
+            let ix_vec: Vec<i64> = (-32..32).collect();
+            let iy_vec: Vec<i64> = (-32..32).collect();
+            let signal_radius = ref_scrim_config.signal_radius;
+            let mut moved = true;
+            for ix in &ix_vec {
+                for iy in &iy_vec {
+                    let new_x = current_guess.x as i64 + *ix;
+                    let new_y = current_guess.y as i64 + *iy;
+                    let mut tmp_min = 0.;
+                    for (meas_pos, fade, meas_signal) in &self.meas_hist {
+                        let delta_x = (new_x - meas_pos.x as i64) as f64;
+                        let delta_y = (new_y - meas_pos.y as i64) as f64;
+                        let distance = (delta_x.powf(2.) + delta_y.powf(2.)).sqrt();
+                        let gem_signal: f64 = fade / (1. + (distance / signal_radius).powf(2.0));
+                        tmp_min += (gem_signal - meas_signal).powf(2.);
                     }
-                }
-                if !found_tmp_min {
-                    break;
+                    //tmp_min = tmp_min / self.meas_hist.len() as f64;
+                    if tmp_min <= self.guess_err {
+                        if *ix==0 && *iy==0 {
+                            moved = false
+                        } else {
+                            moved = true
+                        }
+                        self.guess_err = tmp_min;
+                        new_guess_x = new_x as usize;
+                        new_guess_y = new_y as usize;
+                        //eprintln!("found new min: {} @ {new_guess_x},{new_guess_y}",self.guess_err);
+                    }
                 }
             }
             if new_guess_x > ref_scrim_config.width as usize - 1 {
@@ -531,7 +524,17 @@ impl Gem {
                 new_guess_y = ref_scrim_config.height as usize - 1;
             }
             self.guess_pos = Pos::new(new_guess_x, new_guess_y);
-            self.guess_err = find_min_err;
+            if !moved {
+            self.guess_not_moved +=1;
+            } else {
+                self.guess_not_moved = 0;
+            }
+            if self.meas_hist.len() as f64> ref_scrim_config.signal_fade && self.guess_not_moved as f64>ref_scrim_config.signal_fade*2. {
+                //eprintln!("new_x: {new_guess_x} new_y: {new_guess_y} tmp_min:{}",self.guess_err);
+                if !is_pixel_type(&self.guess_pos, ref_pixel_map,PixelType::Wall) {
+                self.known_pos = Some(self.guess_pos)
+                }
+            } //found_tmp_min = true;
             /*eprintln!(
                 "guessing new Pos: {:?}, error: {} noise {}",
                 self.guess_pos,
@@ -543,6 +546,11 @@ impl Gem {
 }
 
 pub type PixelMap = Array<u8, Ix2>;
+
+pub fn is_pixel_type(ref_pos:&Pos,ref_pixel_map: &PixelMap,pixel_type:PixelType) -> bool {
+    let pix = *ref_pixel_map.get((ref_pos.x,ref_pos.y)).unwrap();
+    pix == pixel_type.as_u8()
+}
 
 pub fn find_unknown_pos(ref_pixel_map: &PixelMap) -> Pos {
     let mut pos_x = 0;
@@ -567,6 +575,7 @@ pub struct Bot {
     target_pos: Option<Pos>,
     current_path: VecDeque<Pos>,
     current_path_value: u32,
+    signal_vec: Vec<f64>,
 }
 
 impl Bot {
@@ -576,6 +585,7 @@ impl Bot {
             target_pos: None,
             current_path: VecDeque::new(),
             current_path_value: 0,
+            signal_vec: Vec::new(),
         }
     }
 
@@ -586,16 +596,28 @@ impl Bot {
         }*/
     }
 
+    pub fn get_signal(&self, channel_id: usize) -> Option<&f64> {
+        self.signal_vec.get(channel_id)
+    }
+
+    pub fn update_signal(&mut self, signal: f64, channel_id: usize) {
+        while self.signal_vec.len() < channel_id + 1 {
+            self.signal_vec.push(f64::default());
+        }
+        self.signal_vec[channel_id] = signal;
+    }
+
     pub fn ref_current_pos(&self) -> Option<&Pos> {
         self.pos_hist.back()
     }
 
     pub fn calculate_path(
         &mut self,
+        ref_scrim_config: &ScrimConfig,
         ref_mut_pixel_map: &mut PixelMap,
         ref_gem_list: &GemList,
     ) -> Option<(Vec<Pos>, u32)> {
-        let target_pos = match ref_gem_list.best_target_pos(*self.ref_current_pos().unwrap()) {
+        let target_pos = match ref_gem_list.best_target_pos(ref_scrim_config, &self) {
             Some(pos) => pos,
             None => find_unknown_pos(ref_mut_pixel_map),
         };
@@ -608,7 +630,7 @@ impl Bot {
                 |p| p.distance(&target_pos),
                 |p| *p == target_pos,
             );
-            for i in 0..10 {
+            for _i in 0..16 {
                 if a_str_path.is_none() {
                     //eprintln!("looping {}", i);
                     if target_pos.x > 0
@@ -651,15 +673,21 @@ impl Bot {
         }
     }
 
-    pub fn reset_path(&mut self, ref_mut_pixel_map: &mut PixelMap, ref_gem_list: &GemList) {
+    pub fn reset_path(
+        &mut self,
+        ref_scrim_config: &ScrimConfig,
+        ref_mut_pixel_map: &mut PixelMap,
+        ref_gem_list: &GemList,
+    ) {
         self.target_pos = None;
         self.current_path = VecDeque::new();
-        self.calculate_path(ref_mut_pixel_map, ref_gem_list);
+        self.calculate_path(ref_scrim_config, ref_mut_pixel_map, ref_gem_list);
     }
 
     pub fn get_move(
         &mut self,
         rng: &mut StdRng,
+        ref_scrim_config: &ScrimConfig,
         ref_mut_pixel_map: &mut PixelMap,
         ref_gem_list: &GemList,
     ) -> &str {
@@ -678,11 +706,13 @@ impl Bot {
                     (1, 0) => "E",
                     (0, 1) => "S",
                     (0, -1) => "N",
-                    (0, 0) => "WAIT",
+                    //(0, 0) => "WAIT",
                     _ => {
-                        self.reset_path(ref_mut_pixel_map, ref_gem_list);
+                        self.target_pos = Some(find_unknown_pos(ref_mut_pixel_map));
+                        self.current_path = VecDeque::new();
+                        self.calculate_path(ref_scrim_config, ref_mut_pixel_map, ref_gem_list);
                         if !self.current_path.is_empty() {
-                            self.get_move(rng, ref_mut_pixel_map, ref_gem_list)
+                            self.get_move(rng, ref_scrim_config, ref_mut_pixel_map, ref_gem_list)
                         } else {
                             moves[move_index]
                         }
@@ -690,9 +720,9 @@ impl Bot {
                 }
             }
             _ => {
-                self.reset_path(ref_mut_pixel_map, ref_gem_list);
+                self.reset_path(ref_scrim_config, ref_mut_pixel_map, ref_gem_list);
                 if !self.current_path.is_empty() {
-                    self.get_move(rng, ref_mut_pixel_map, ref_gem_list)
+                    self.get_move(rng, ref_scrim_config, ref_mut_pixel_map, ref_gem_list)
                 } else {
                     moves[move_index]
                 }
@@ -702,10 +732,13 @@ impl Bot {
 
     pub fn current_path(
         &mut self,
+        ref_scrim_config: &ScrimConfig,
         ref_mut_pixel_map: &mut PixelMap,
         ref_gem_list: &GemList,
     ) -> Vec<Pos> {
-        if let Some((path, v)) = self.calculate_path(ref_mut_pixel_map, ref_gem_list) {
+        if let Some((path, _v)) =
+            self.calculate_path(ref_scrim_config, ref_mut_pixel_map, ref_gem_list)
+        {
             /*for path_pos in &path {
                 self.current_path.push_back(*path_pos);
             }*/
@@ -717,7 +750,7 @@ impl Bot {
 }
 
 fn main() {
-    let mut SCRIM_CONFIG = ScrimConfig::default();
+    let mut scrim_config = ScrimConfig::default();
     let mut rng = StdRng::seed_from_u64(1);
     //let moves = ["N", "S", "E", "W", "WAIT"];
     let mut first_tick = true;
@@ -746,38 +779,38 @@ fn main() {
                         .get("bot_seed")
                         .map(|v| v.as_u64().unwrap_or(0))
                         .unwrap_or(0);
-                    SCRIM_CONFIG.bot_seed = bot_seed;
+                    scrim_config.bot_seed = bot_seed;
                     let gem_ttl = cfg_map
                         .get("gem_ttl")
                         .map(|v| v.as_u64().unwrap_or(0))
                         .unwrap_or(0);
-                    SCRIM_CONFIG.gem_ttl = gem_ttl;
+                    scrim_config.gem_ttl = gem_ttl;
                     let signal_radius = cfg_map
                         .get("signal_radius")
                         .map(|v| v.as_f64().unwrap_or(0.))
                         .unwrap_or(0.);
-                    SCRIM_CONFIG.signal_radius = signal_radius;
+                    scrim_config.signal_radius = signal_radius;
                     let signal_noise = cfg_map
                         .get("signal_noise")
                         .map(|v| v.as_f64().unwrap_or(0.))
                         .unwrap_or(0.);
-                    SCRIM_CONFIG.signal_noise = signal_noise;
+                    scrim_config.signal_noise = signal_noise;
                     let signal_fade = cfg_map
                         .get("signal_fade")
                         .map(|v| v.as_f64().unwrap_or(0.))
                         .unwrap_or(0.);
-                    SCRIM_CONFIG.signal_fade = signal_fade;
+                    scrim_config.signal_fade = signal_fade;
 
                     let width = cfg_map
                         .get("width")
                         .map(|v| v.as_u64().unwrap_or(0))
                         .unwrap_or(0);
-                    SCRIM_CONFIG.width = width;
+                    scrim_config.width = width;
                     let height = cfg_map
                         .get("height")
                         .map(|v| v.as_u64().unwrap_or(0))
                         .unwrap_or(0);
-                    SCRIM_CONFIG.height = height;
+                    scrim_config.height = height;
                     //eprintln!("Random walker (Rust) launching on a {width}x{height} map");
                     opt_map = Some(Array::from_elem(
                         (width.try_into().unwrap(), height.try_into().unwrap()).f(),
@@ -820,21 +853,17 @@ fn main() {
                     let meas = channel_meas.as_f64().unwrap();
                     if meas > 0. {
                         if let Some(ref ref_pixel_map) = opt_map {
-                            gem_list.add_gem_with_channel(
-                                ref_pixel_map,
-                                *bot.ref_current_pos().unwrap(),
-                                300,
-                                channel_id,
-                            );
+                            gem_list.add_gem_with_channel(ref_pixel_map, 300, channel_id);
                         }
                         gem_list.add_channel_measurement(
-                            &SCRIM_CONFIG,
+                            &scrim_config,
                             channel_id,
                             *bot.ref_current_pos().unwrap(),
                             meas,
                         );
+                        bot.update_signal(meas, channel_id);
                     } else {
-                        gem_list.remove_channel(channel_id);
+                        gem_list.remove_gem_with_channel(channel_id);
                     }
                 }
             }
@@ -854,11 +883,13 @@ fn main() {
                     }
                 }
                 if let Some(ref mut ref_mut_pixel_map) = opt_map {
-                    bot.reset_path(ref_mut_pixel_map, &gem_list);
+                    bot.reset_path(&scrim_config, ref_mut_pixel_map, &gem_list);
                 }
             }
         }
-        gem_list.next_tick(&SCRIM_CONFIG, &bot);
+        if let Some(ref ref_pixel_map) = opt_map {
+            gem_list.next_tick(&scrim_config, &bot,ref_pixel_map);
+        }
 
         // Emit a random move
         //let move_index = rng.random_range(0..moves.len());
@@ -871,7 +902,7 @@ fn main() {
             .color(gem_list.known_pos_vec(), "ffff00", 90)
             .color(gem_list.guess_pos_vec(), "ff00ff", 60);
         if let Some(ref_mut_pixel_map) = opt_map.as_mut() {
-            let a_star_path = bot.current_path(ref_mut_pixel_map, &gem_list);
+            let a_star_path = bot.current_path(&scrim_config, ref_mut_pixel_map, &gem_list);
             highlight = highlight.white(a_star_path, 90);
             highlight = highlight.color(vec![find_unknown_pos(ref_mut_pixel_map)], "#ff0000", 60);
             let highlight_json = serde_json::to_string(&highlight).unwrap();
@@ -879,7 +910,7 @@ fn main() {
             //eprintln!("{gem_list:?}");
             println!(
                 "{} {highlight_json}",
-                bot.get_move(&mut rng, ref_mut_pixel_map, &gem_list)
+                bot.get_move(&mut rng, &scrim_config, ref_mut_pixel_map, &gem_list)
             );
             let _ = io::stdout().flush();
         }
