@@ -504,7 +504,7 @@ impl Gem {
                         tmp_min += (gem_signal - meas_signal).powf(2.);
                     }
                     //tmp_min = tmp_min / self.meas_hist.len() as f64;
-                    if tmp_min <= self.guess_err {
+                    if tmp_min <= self.guess_err*0.99 {
                         if *ix==0 && *iy==0 {
                             moved = false
                         } else {
