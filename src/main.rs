@@ -216,6 +216,9 @@ impl GemList {
             let mut min_dist = u32::MAX;
             for pos in self.known_pos_vec() {
                 let dist = pos.distance(&ref_bot.ref_current_pos().unwrap());
+                /*for other_pos in self.known_pos_vec() {
+                    dist+=pos.distance(&other_pos)
+                }*/
                 if dist < min_dist {
                     min_dist = dist;
                     ret_pos = Some(pos);
@@ -504,7 +507,7 @@ impl Gem {
                         tmp_min += (gem_signal - meas_signal).powf(2.);
                     }
                     //tmp_min = tmp_min / self.meas_hist.len() as f64;
-                    if tmp_min <= self.guess_err*0.99 {
+                    if tmp_min <= self.guess_err {
                         if *ix==0 && *iy==0 {
                             moved = false
                         } else {
