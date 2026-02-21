@@ -517,18 +517,11 @@ impl Gem {
                     }
                 }
             }
-            if new_guess_x < 1 {
-                new_guess_x =1; 
+            if new_guess_x > ref_scrim_config.width as usize - 1 {
+                new_guess_x = ref_scrim_config.width as usize - 1;
             }
-            if new_guess_y < 1 {
-                new_guess_y = 1 
-            }
-            
-            if new_guess_x > ref_scrim_config.width as usize - 2 {
-                new_guess_x = ref_scrim_config.width as usize - 2;
-            }
-            if new_guess_y > ref_scrim_config.height as usize - 2 {
-                new_guess_y = ref_scrim_config.height as usize - 2;
+            if new_guess_y > ref_scrim_config.height as usize - 1 {
+                new_guess_y = ref_scrim_config.height as usize - 1;
             }
             self.guess_pos = Pos::new(new_guess_x, new_guess_y);
             if !moved {
