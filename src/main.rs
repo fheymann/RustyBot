@@ -529,7 +529,7 @@ impl Gem {
             } else {
                 self.guess_not_moved = 0;
             }
-            if self.meas_hist.len() as f64> ref_scrim_config.signal_fade && self.guess_not_moved as f64>ref_scrim_config.signal_fade*2. {
+            if self.guess_not_moved as f64>ref_scrim_config.signal_fade {
                 //eprintln!("new_x: {new_guess_x} new_y: {new_guess_y} tmp_min:{}",self.guess_err);
                 if !is_pixel_type(&self.guess_pos, ref_pixel_map,PixelType::Wall) {
                 self.known_pos = Some(self.guess_pos)
@@ -619,7 +619,26 @@ impl Bot {
     ) -> Option<(Vec<Pos>, u32)> {
         let target_pos = match ref_gem_list.best_target_pos(ref_scrim_config, &self) {
             Some(pos) => pos,
-            None => find_unknown_pos(ref_mut_pixel_map),
+            None => {
+                let mut pos = find_unknown_pos(ref_mut_pixel_map);
+                if pos==Pos::new(0,0) {
+                    let mid_x = (ref_scrim_config.width/2) as i64;
+                    let mid_y = (ref_scrim_config.height/2) as i64;
+                    let ix_vec: Vec<i64> = (-32..32).collect();
+                    let iy_vec: Vec<i64> = (-32..32).collect();
+                    let min_dist = 65;
+                    for ix in &ix_vec {
+                        for iy in &iy_vec {
+                            let dist = ix.abs() + iy.abs();
+                            let tmp_pos = Pos::new((mid_x+ix) as usize,(mid_y+iy) as usize); 
+                            if dist<min_dist && !is_pixel_type(&tmp_pos, ref_mut_pixel_map, PixelType::Wall){
+                                pos = tmp_pos
+                            }
+                        }
+                    }
+                }
+                pos
+            },
         };
         if self.target_pos.is_none() {
             //eprintln!("target_pos is none");
@@ -659,6 +678,13 @@ impl Bot {
                 self.target_pos = Some(target_pos);
                 a_str_path
             } else {
+                if target_pos.x > 0
+                    && target_pos.x < ref_mut_pixel_map.dim().0 - 1
+                    && target_pos.y > 0
+                    && target_pos.y < ref_mut_pixel_map.dim().1 - 1
+                {
+                        ref_mut_pixel_map[(target_pos.x, target_pos.y)] = PixelType::Wall.as_u8();
+                }
                 self.current_path = VecDeque::new();
                 self.current_path_value = 0;
                 self.target_pos = None;
