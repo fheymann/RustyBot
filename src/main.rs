@@ -227,8 +227,8 @@ impl GemList {
         } else if !self.guess_pos_vec().is_empty() {
             let mut max_signal = f64::MIN;
             for gem in self.guess_vec() {
-                if gem.ttl < ref_scrim_config.gem_ttl - ref_scrim_config.signal_fade as u64
-                    && let Some(tmp_signal) = ref_bot.get_signal(gem.channel_id())
+                if let Some(tmp_signal) = ref_bot.get_signal(gem.channel_id())
+                    && gem.ttl < ref_scrim_config.gem_ttl - ref_scrim_config.signal_fade as u64
                 {
                     if *tmp_signal > max_signal {
                         max_signal = *tmp_signal;
@@ -551,8 +551,12 @@ impl Gem {
 pub type PixelMap = Array<u8, Ix2>;
 
 pub fn is_pixel_type(ref_pos:&Pos,ref_pixel_map: &PixelMap,pixel_type:PixelType) -> bool {
-    let pix = *ref_pixel_map.get((ref_pos.x,ref_pos.y)).unwrap();
-    pix == pixel_type.as_u8()
+    
+    if let Some(pix) = ref_pixel_map.get((ref_pos.x,ref_pos.y)) {
+        *pix == pixel_type.as_u8()
+    } else {
+        false
+    }
 }
 
 pub fn find_unknown_pos(ref_pixel_map: &PixelMap) -> Pos {
